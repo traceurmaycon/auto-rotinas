@@ -1,0 +1,282 @@
+USE [pd_inss]
+GO
+
+/* EXECUTAR O CÓDIGO ABAIXO NA PRIMEIRA EXECUÇÃO APÓS O RESTORE. DEPOIS COMENTAR NOVAMENTE PARA EXECUTAR TODO O RESTO. */
+--CREATE SCHEMA [desenv]
+--GO
+
+-- Dada uma string, insere um ponto flutuante na posição antipenúltima do texto.
+CREATE OR ALTER FUNCTION [desenv].[fnc_inserirPontoFlutuante] (
+	@pNumero VARCHAR(20)
+)
+RETURNS VARCHAR(21)
+BEGIN
+	DECLARE @retorno VARCHAR(21)
+	
+	DECLARE @numero VARCHAR(20) = @pNumero
+
+	SET @retorno = REVERSE(STUFF(REVERSE(@numero), 3, 0, '.'))
+
+	RETURN @retorno
+END
+GO
+----------------------------------------------------------------------------------------------------------------
+
+
+
+-- Adiciona zeros à esquerda de um dado número
+-- O terceiro parâmetro recebe:
+-- 0 manter o campo do jeito que está e acrescentar os zeros a esquerda
+-- 1 para números inteiros, adicionando dois zeros a direita e os restantes a esquerda;
+-- 2 para números fracionários mantendo o número do mesmo jeito, apenas removendo o ponto flutuante e adicionando os zeros;
+CREATE OR ALTER FUNCTION [desenv].[fnc_adicionarZeroEsquerda] (
+	@pNumero	VARCHAR(480),
+	@pPosicoes	SMALLINT,
+	@pTipoCampo SMALLINT = 0
+)
+RETURNS VARCHAR(480)
+BEGIN
+	DECLARE @retorno	VARCHAR(480)
+	
+	DECLARE @numero		VARCHAR(480)	= @pNumero
+	DECLARE @posicoes	SMALLINT		= @pPosicoes
+	DECLARE @tipoCampo	SMALLINT		= @pTipoCampo
+
+	IF (@tipoCampo = 0)
+	BEGIN
+		SET @retorno = RIGHT(REPLICATE('0', @posicoes) + CAST(@numero AS VARCHAR(100)), @posicoes)
+	END
+	
+	IF (@tipoCampo = 1)
+	BEGIN
+		SET @retorno = RIGHT(REPLICATE('0', @posicoes) + CAST(@numero AS VARCHAR(100)) + '00', @posicoes)
+	END
+
+	IF (@tipoCampo = 2)
+	BEGIN
+		SET @retorno = RIGHT(REPLICATE('0', @posicoes) + CAST(REPLACE(@numero, '.', '') AS VARCHAR(100)), @posicoes)
+	END
+
+	RETURN @retorno
+END
+GO
+
+-- Retira os espaços à esquerda e a direita de um determinado texto
+CREATE OR ALTER FUNCTION [desenv].[fnc_trim] (@pTexto VARCHAR(8000))
+RETURNS VARCHAR(8000)
+BEGIN
+	DECLARE @retorno VARCHAR(8000)
+	
+	DECLARE @texto VARCHAR(8000) = @pTexto
+	SET @retorno = RTRIM(LTRIM(@texto))
+
+	RETURN @retorno
+END
+GO
+-----------------------------------------------------------------------------------------------------------------------
+
+
+
+-- Procedure pra gerar um arquivo, dada uma query com o conteúdo
+CREATE OR ALTER PROCEDURE [desenv].[stp_gerarArquivo] (
+	@pQuery VARCHAR(1000),
+	@pDiretorio VARCHAR(200),
+	@pArquivo VARCHAR(100)
+)
+AS BEGIN
+	SET NOCOUNT ON
+
+	DECLARE @query VARCHAR(1000) = @pQuery
+	DECLARE @diretorio VARCHAR(200) = @pDiretorio
+	DECLARE @arquivo VARCHAR(100) = @pArquivo
+	DECLARE @comando VARCHAR(8000)
+	DECLARE @result TABLE ([saida] VARCHAR(1000))
+	DECLARE @erro VARCHAR(1000)
+	DECLARE @mensagemErro VARCHAR(2000)
+
+	DECLARE @diretorioCompleto VARCHAR(300)
+
+	IF (RIGHT(@diretorio, 1) <> '\')
+		SET @diretorio = CONCAT(@diretorio, '\')
+	SET @diretorioCompleto = CONCAT(@diretorio, @arquivo)
+	
+	SET @comando = CONCAT('bcp "', @query, '" queryout "', @diretorioCompleto,'" -c -C"ACP" -T -S', @@SERVERNAME)
+	
+	BEGIN TRY
+		INSERT INTO @result
+		EXEC master..xp_cmdshell @comando
+
+		IF EXISTS(SELECT [saida] FROM @result WHERE [saida] LIKE 'Error = %')
+		BEGIN
+			SELECT TOP 1 @erro = [saida] FROM @result WHERE [saida] LIKE 'Error = %'
+			SET @mensagemErro = CONCAT('Não foi possivel gerar o arquivo. Erro: ', @erro)
+			SET @comando = CONCAT('del ', @diretorioCompleto)
+			EXEC master..xp_cmdshell @comando, no_output
+			
+			RAISERROR (@mensagemErro, 16, 1)
+		END
+	END TRY
+	BEGIN CATCH
+		DECLARE @ErrorMessage	NVARCHAR(4000)
+		DECLARE @ErrorSeverity	INT
+		DECLARE @ErrorState		INT
+  
+		SELECT   
+			@ErrorMessage	= ERROR_MESSAGE(),  
+			@ErrorSeverity	= ERROR_SEVERITY(),  
+			@ErrorState		= ERROR_STATE();  
+  
+		RAISERROR (@ErrorMessage, @ErrorSeverity, @ErrorState)
+	END CATCH
+END
+GO
+----------------------------------------------------------------------------------------------------------------
+
+
+
+
+-- Gera arquivos de devolução vazios em um determinado diretório
+-- Dois parâmetros opcionais a data e o diretório
+-- Se a data não for informada, utiliza a data atual de sistema
+-- Se o diretório não for informado, utiliza o C:\ da máquina executante
+CREATE OR ALTER PROCEDURE [desenv].[stp_gerarArquivosDevolucaoSisarc] (
+	@pData DATE = NULL,
+	@pDiretorio VARCHAR(100) = NULL
+)
+AS BEGIN
+	SET NOCOUNT ON
+
+	DECLARE @data DATE = ISNULL(@pData, GETDATE())
+	DECLARE @diretorio VARCHAR(100) = @pDiretorio
+
+	DECLARE @ip VARCHAR(15)
+	
+	DECLARE @nomeArquivoDVC VARCHAR(20)
+	DECLARE @nomeArquivoSTR VARCHAR(20)
+
+	DECLARE @query1 VARCHAR(500)
+	DECLARE @query2 VARCHAR(500)
+
+	SET @ip = CAST ((SELECT CONNECTIONPROPERTY('client_net_address') AS IP) AS VARCHAR(15))
+
+	IF (@diretorio IS NULL)
+		SET @diretorio = ISNULL(@diretorio, CONCAT('\\', @ip + '\c$\'))
+	
+	IF (RIGHT(@diretorio, 1) <> '\')
+		SET @diretorio = CONCAT(@diretorio, '\')
+
+	SELECT @nomeArquivoDVC = 'DVC' + FORMAT(@data, 'ddMM') + '.037',
+			@nomeArquivoSTR = 'ARCDEV' + FORMAT(@data, 'ddMM') + '.TXT'
+
+	IF OBJECT_ID('tempdb..##arquivos_devolucao') IS NOT NULL
+		DROP TABLE [##arquivos_devolucao]
+
+	CREATE TABLE [##arquivos_devolucao] (
+		[arquivo]	VARCHAR(50),
+		[linha]		SMALLINT,
+		[registro]	VARCHAR(200)
+	)
+
+	INSERT INTO [##arquivos_devolucao] 
+		([arquivo], [linha], [registro])
+	VALUES
+		(@nomeArquivoDVC, 1, REPLICATE('0', 47) + 'DVC6050000001' + SPACE(4) + '7' + CONVERT(VARCHAR(8), @data, 112) + SPACE(58) + '04913711' + SPACE(11) + '0000000001'),
+		(@nomeArquivoDVC, 2, REPLICATE('9', 47) + 'DVC6050000001' + SPACE(4) + '7' + CONVERT(VARCHAR(8), @data, 112) + REPLICATE('0', 17) + SPACE(41) + '04913711' + SPACE(11) + '0000000002'),
+		(@nomeArquivoSTR, 1, '1' + 'SISARC' + SPACE(4) + CONVERT(VARCHAR(8), @data, 112) + SPACE(15) + '000001'),
+		(@nomeArquivoSTR, 2, '9' + REPLICATE('0', 20) + SPACE(13) + '000002')
+
+	SET @query1 = 'SELECT [registro] FROM [##arquivos_devolucao] WHERE [arquivo] LIKE ''DVC%'' ORDER BY [arquivo], [linha] ASC'
+	SET @query2 = 'SELECT [registro] FROM [##arquivos_devolucao] WHERE [arquivo] LIKE ''ARCDEV%'' ORDER BY [arquivo], [linha] ASC'
+
+	EXEC [desenv].[stp_gerarArquivo] @query1, @diretorio, @nomeArquivoDVC
+	EXEC [desenv].[stp_gerarArquivo] @query2, @diretorio, @nomeArquivoSTR
+
+	DROP TABLE [##arquivos_devolucao]
+END
+GO
+----------------------------------------------------------------------------------------------------------------
+
+
+-- Gera um trailler do arquivo INSSMMDD.TXT
+-- Deve-se passar o trailer do arquivo a ser modificado, a quantidade de linhas que serão inseridas no arquivo novo
+-- e o valor total decorrente da soma de todas linhas novas incluídas para estar no arquivo novo.
+
+CREATE OR ALTER PROCEDURE [desenv].[stp_gerarTraillerArquivoMultiservINSS] (
+	@pTraillerAntigo CHAR(101),
+	@pNovasLinhas SMALLINT,
+	@pNovoValor FLOAT
+)
+AS BEGIN
+	DECLARE @traillerAntigo CHAR(101) = @pTraillerAntigo
+	DECLARE @novasLinhas	SMALLINT = @pNovasLinhas
+	DECLARE @novoValor		NUMERIC(11,2) = @pNovoValor
+
+	DECLARE @linhas			SMALLINT
+	DECLARE @valor			NUMERIC(11,2)
+	DECLARE @traillerNovo	CHAR(101)
+
+	DECLARE @linhasFormatadas CHAR(6)
+	DECLARE @valorFormatado CHAR(12)
+	
+	SET @linhas = CAST(SUBSTRING(@traillerAntigo, 16, 6) AS SMALLINT) + @novasLinhas
+	SET @valor = [desenv].[fnc_inserirPontoFlutuante] (SUBSTRING(@traillerAntigo, 22, 11)) + @novoValor
+
+	SET @linhasFormatadas = [desenv].[fnc_adicionarZeroEsquerda] (@linhas, 6, 0)
+	SET @valorFormatado = [desenv].[fnc_adicionarZeroEsquerda] (@valor, 11, 2)
+
+	SET @traillerNovo = CONCAT(REPLICATE('9', 15), @linhasFormatadas, @valorFormatado, SPACE(68))
+
+	SELECT @traillerNovo
+END
+GO
+----------------------------------------------------------------------------------------------------------------
+
+
+
+-- Gera uma linha de detalhe do arquivo INSSMMDD.TXT
+-- Deverão ser informados 0 ou 1, pra caso não seja aposentado ou seja.
+-- O CPF em varchar e a agencia e a conta em números inteiros e valor com ponto flutuante.
+CREATE OR ALTER PROCEDURE [desenv].[stp_gerarDetalheArquivoMultiservINSS] (
+	@pAposentado BIT = 0,
+	@pCpf VARCHAR(11),
+	@pAgencia INT,
+	@pConta NUMERIC(10),
+	@pValor NUMERIC(11,2)
+)
+AS BEGIN
+	DECLARE @linha CHAR(100)
+	
+	DECLARE @orgao CHAR(5) = IIF(@pAposentado = 0, '61001', '61002')
+	DECLARE @cpf VARCHAR(11) = @pCpf
+	DECLARE @agencia INT = @pAgencia
+	DECLARE @conta NUMERIC(10) = @pConta
+	DECLARE @valor NUMERIC(11, 2) = @pValor
+		
+	IF (@cpf IS NULL OR @agencia IS NULL OR @conta IS NULL OR @valor IS NULL)
+	BEGIN
+		SELECT 'Informar CPF, agencia, conta e valor'
+	END
+	
+	SET @linha = CONCAT(
+						'00061',
+						@orgao,
+						REPLICATE('0',10),
+						@cpf,
+						'010',
+						SPACE(2),
+						'037',
+						[desenv].[fnc_adicionarZeroEsquerda] (@agencia, 4, 0),
+						[desenv].[fnc_adicionarZeroEsquerda] (@conta, 10, 0),
+						[desenv].[fnc_adicionarZeroEsquerda] (@valor, 11, 2),
+						'01',
+						SPACE(34)
+					)
+	SELECT @linha
+END
+GO
+----------------------------------------------------------------------------------------------------------------
+
+
+--EXEC desenv.stp_gerarArquivosDevolucaoSisarc '2022-05-15', 'C:/'
+--EXEC desenv.stp_gerarTraillerArquivoMultiservINSS '99999999999999900001000000820200                                                                    ', 4, 3745.12
+--EXEC desenv.stp_gerarDetalheArquivoMultiservINSS 0, '12312312301', 15, 123456, 1234.56
